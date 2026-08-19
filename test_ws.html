@@ -1,0 +1,54 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test WebSocket MvpMonitoreo</title>
+    <style>
+        body { font-family: Arial, sans-serif; padding: 20px; background: #1e1e1e; color: #fff; }
+        #log { background: #000; padding: 10px; height: 400px; overflow-y: scroll; font-family: monospace; }
+        .info { color: #00ff00; }
+        .data { color: #00bfff; }
+        .error { color: #ff4444; }
+    </style>
+</head>
+<body>
+    <h2>WebSocket Test</h2>
+    <input type="text" id="networkId" value="1" placeholder="ID de la Red">
+    <button onclick="connect()">Conectar</button>
+    <button onclick="disconnect()">Desconectar</button>
+    <br><br>
+    <div id="log"></div>
+
+    <script>
+        let ws = null;
+        const logDiv = document.getElementById('log');
+
+        function log(message, type) {
+            logDiv.innerHTML += `<div class="${type}">[${new Date().toLocaleTimeString()}] ${message}</div>`;
+            logDiv.scrollTop = logDiv.scrollHeight;
+        }
+
+        function connect() {
+            if(ws) ws.close();
+            const netId = document.getElementById('networkId').value;
+            log(`Conectando a ws://127.0.0.1:8000/ws/networks/${netId}...`, 'info');
+            
+            ws = new WebSocket(`ws://127.0.0.1:8000/ws/networks/${netId}`);
+            
+            ws.onopen = () => log("Conexión establecida. Red marcada como ACTIVA en backend.", 'info');
+            
+            ws.onmessage = (event) => {
+                log("Mensaje recibido:", 'data');
+                const data = JSON.parse(event.data);
+                log(JSON.stringify(data, null, 2).replace(/\n/g, "<br>").replace(/ /g, "&nbsp;"), 'data');
+            };
+            
+            ws.onclose = () => log("Conexión cerrada. Red regresará a BACKGROUND.", 'error');
+            ws.onerror = (e) => log("Error en WebSocket.", 'error');
+        }
+
+        function disconnect() {
+            if(ws) ws.close();
+        }
+    </script>
+</body>
+</html>

@@ -1,0 +1,37 @@
+# ────────────────────────────────────────────────────────────────
+# MvpMonitoreo — Guía Rápida de Comandos
+# ────────────────────────────────────────────────────────────────
+
+# 1. INSTALACIÓN DE DEPENDENCIAS
+# Instala todas las librerías necesarias (FastAPI, asyncpg, pytest, etc.)
+pip install -r requirements.txt
+
+# 2. ARRANCAR EL SERVIDOR (Desarrollo)
+# Levanta la API con recarga automática al cambiar archivos.
+# Asegúrate de tener PostgreSQL corriendo antes.
+uvicorn main:app --host 0.0.0.0 --port 8000 --reload
+
+# 3. DOCUMENTACIÓN DE LA API (Swagger)
+# Una vez que el servidor esté corriendo, abre esta URL en tu navegador:
+# http://localhost:8000/docs
+
+# 4. PRUEBAS UNITARIAS (Tests)
+# Corre todas las pruebas (discovery, inventory, services, storage)
+pytest tests/
+
+# Corre las pruebas mostrando detalles si alguna falla (-v = verbose)
+pytest tests/ -v
+
+# Corre las pruebas y muestra un resumen corto (-q = quiet)
+pytest tests/ -q
+
+# 5. ARRANCAR EL SERVIDOR (Producción)
+# Nota: --workers 1 es OBLIGATORIO porque usamos ScannerRegistry
+uvicorn main:app --host 0.0.0.0 --port 8000 --workers 1
+
+# USUARIO DE PRUEBA
+# E-Mail: test@admin.com
+# Contraseña: 987654321
+
+# TRUNCAR TODAS LAS TABLAS Y REINICIAR SECUENCIAS (REPORTEO)
+TRUNCATE TABLE roles, users, networks, scan_results, devices, device_inventory, hostname_changes, port_checks, device_stats RESTART IDENTITY CASCADE;
