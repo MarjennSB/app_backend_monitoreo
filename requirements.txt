@@ -30,3 +30,5 @@ rich>=13.7.0        # Terminal interactiva, tablas, colores
 PyJWT>=2.8.0        # Generación/validación de tokens JWT
 passlib>=1.7.4
 bcrypt==3.2.2
+pandas>=2.0.0       # Lectura de Excel/CSV
+websockets>=12.0    # Soporte para WebSockets
