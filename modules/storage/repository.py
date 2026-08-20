@@ -222,6 +222,7 @@ class NetworkRepository:
     async def update(
         self,
         network_id: int,
+        cidr: Optional[str] = None,
         vlan_id: Optional[int] = None,
         scan_interval: Optional[int] = None,
         is_active: Optional[bool] = None,
@@ -234,14 +235,15 @@ class NetworkRepository:
         row = await db.fetch_one(
             """
             UPDATE networks SET
-                vlan_id       = COALESCE($2, vlan_id),
-                scan_interval = COALESCE($3, scan_interval),
-                is_active     = COALESCE($4, is_active),
+                cidr          = COALESCE($2, cidr),
+                vlan_id       = COALESCE($3, vlan_id),
+                scan_interval = COALESCE($4, scan_interval),
+                is_active     = COALESCE($5, is_active),
                 updated_at    = NOW()
             WHERE id = $1
             RETURNING *
             """,
-            network_id, vlan_id, scan_interval, is_active,
+            network_id, cidr, vlan_id, scan_interval, is_active,
         )
         return NetworkModel.from_record(row) if row else None
 
@@ -398,8 +400,14 @@ class DeviceRepository:
                  NOW())
             ON CONFLICT (network_id, ip)
             DO UPDATE SET
-                hostname        = EXCLUDED.hostname,
-                hostname_method = EXCLUDED.hostname_method,
+                hostname        = CASE 
+                                    WHEN EXCLUDED.hostname != 'unknown' THEN EXCLUDED.hostname 
+                                    ELSE devices.hostname 
+                                  END,
+                hostname_method = CASE 
+                                    WHEN EXCLUDED.hostname_method != 'unknown' THEN EXCLUDED.hostname_method 
+                                    ELSE devices.hostname_method 
+                                  END,
                 is_alive        = EXCLUDED.is_alive,
                 mac_address     = COALESCE(EXCLUDED.mac_address, devices.mac_address),
                 last_seen_at    = CASE WHEN EXCLUDED.is_alive THEN NOW()
@@ -784,6 +792,11 @@ class InventoryRepository:
         )
         return InventoryModel.from_record(row) if row else None
 
+    async def get_all(self) -> list[InventoryModel]:
+        """Retorna el inventario de todos los dispositivos registrados."""
+        rows = await db.fetch_all("SELECT * FROM device_inventory")
+        return [InventoryModel.from_record(r) for r in rows]
+
     async def get_by_network(self, network_id: int) -> list[InventoryModel]:
         """Retorna el inventario de todos los dispositivos de una red."""
         rows = await db.fetch_all(
@@ -819,6 +832,77 @@ class InventoryRepository:
             network_id, device_type,
         )
         return [InventoryModel.from_record(r) for r in rows]
+
+    async def bulk_upsert_inventory_and_hostnames(self, processed_data: list[dict]) -> None:
+        """
+        Inserta o actualiza masivamente el inventario proveniente de sheets_sync.py.
+        También actualiza el hostname en 'devices' y registra el cambio en 'hostname_changes'.
+        """
+        for item in processed_data:
+            # 1. Obtener device_id usando la IP (solo se actualizan los que ya existen en devices)
+            device_row = await db.fetch_one("SELECT id, hostname FROM devices WHERE ip = $1", item["ip"])
+            if not device_row:
+                continue
+            
+            device_id = device_row["id"]
+            old_hostname = device_row["hostname"]
+            new_hostname = item["hostname"]
+
+            # 2. Actualizar inventario (El campo 'graph' lo mapeamos temporalmente a 'description' de la BD)
+            await db.execute(
+                """
+                INSERT INTO device_inventory (
+                    device_id, device_type, manufacturer, model, description,
+                    location, contact, os_info, cpu_model, ram_mb, disk_gb,
+                    read_method, last_updated
+                ) VALUES (
+                    $1, $2, 'unknown', $3, $4, $5, $6, $7, $8, $9, $10, 'excel', NOW()
+                )
+                ON CONFLICT (device_id)
+                DO UPDATE SET
+                    device_type    = COALESCE(NULLIF(EXCLUDED.device_type, 'unknown'), device_inventory.device_type),
+                    model          = COALESCE(NULLIF(EXCLUDED.model, 'unknown'), device_inventory.model),
+                    description    = COALESCE(NULLIF(EXCLUDED.description, ''), device_inventory.description, ''),
+                    location       = COALESCE(NULLIF(EXCLUDED.location, ''), device_inventory.location, ''),
+                    contact        = COALESCE(NULLIF(EXCLUDED.contact, ''), device_inventory.contact, ''),
+                    os_info        = COALESCE(NULLIF(EXCLUDED.os_info, ''), device_inventory.os_info, ''),
+                    cpu_model      = COALESCE(NULLIF(EXCLUDED.cpu_model, ''), device_inventory.cpu_model, ''),
+                    ram_mb         = COALESCE(EXCLUDED.ram_mb, device_inventory.ram_mb),
+                    disk_gb        = COALESCE(EXCLUDED.disk_gb, device_inventory.disk_gb),
+                    read_method    = 'excel',
+                    last_updated   = NOW()
+                """,
+                device_id,
+                item["device_type"],
+                item["model"],
+                item["graph"],  # El diccionario Python trae 'graph', y lo insertamos en el campo description de la BD
+                item["location"],
+                item["contact"],
+                item["os_info"],
+                item["cpu_model"],
+                item["ram_mb"],
+                item["disk_gb"]
+            )
+
+            # 3. Lógica de Hostname Change
+            # Si el Excel trae un hostname válido y es diferente al que tenemos:
+            if new_hostname and new_hostname != "unknown" and old_hostname != new_hostname:
+                # Actualizamos la tabla principal de dispositivos
+                await db.execute(
+                    "UPDATE devices SET hostname = $1, updated_at = NOW() WHERE id = $2",
+                    new_hostname, device_id
+                )
+                
+                # Registramos en el historial SOLO si el viejo no era 'unknown'
+                # (pasar de unknown a un nombre no es un "cambio" propiamente, es un descubrimiento)
+                if old_hostname != "unknown":
+                    await db.execute(
+                        """
+                        INSERT INTO hostname_changes (device_id, old_hostname, new_hostname)
+                        VALUES ($1, $2, $3)
+                        """,
+                        device_id, old_hostname, new_hostname
+                    )
 
 
 # ──────────────────────────────────────────────

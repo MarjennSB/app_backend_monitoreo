@@ -103,10 +103,14 @@ async def sync_scan_result(scan_data: RawScanData) -> None:
         analyzer = analyzer_registry.get_or_create(scan_data.network_cidr, host.ip)
         
         # Simular PingResult basado en RawHostData
+        rtt_val = float(host.scan_duration_ms)
+        if rtt_val > 99999.0:
+            rtt_val = 99999.0
+            
         ping_res = PingResult(
             ip=host.ip,
             is_alive=host.is_alive,
-            rtt_ms=float(host.scan_duration_ms),
+            rtt_ms=rtt_val,
             hostname="unknown",
             hostname_method="unknown",
             hostname_changed=False,

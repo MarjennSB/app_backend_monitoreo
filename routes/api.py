@@ -30,7 +30,7 @@ from datetime import datetime
 from typing import Optional
 
 from fastapi import APIRouter, HTTPException, Query
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 
 from core.system_monitor import system_monitor
 from modules.storage.database import db
@@ -88,15 +88,40 @@ class NetworkCreateRequest(BaseModel):
     vlan_id: Optional[int] = None
     scan_interval: int  = 300   # segundos
 
+    @field_validator('cidr')
+    def validate_cidr(cls, v):
+        import ipaddress
+        if "/" not in v:
+            v = f"{v}/24"
+        try:
+            ipaddress.IPv4Network(v, strict=False)
+        except ValueError:
+            raise ValueError('CIDR inválido')
+        return v
+
 class VipStatusRequest(BaseModel):
     is_critical: bool
 
 
 class NetworkUpdateRequest(BaseModel):
     """Payload para actualizar una red."""
+    cidr: Optional[str]          = None
     vlan_id: Optional[int]       = None
     scan_interval: Optional[int] = None
     is_active: Optional[bool]    = None
+
+    @field_validator('cidr')
+    def validate_cidr(cls, v):
+        if v is None:
+            return v
+        import ipaddress
+        if "/" not in v:
+            v = f"{v}/24"
+        try:
+            ipaddress.IPv4Network(v, strict=False)
+        except ValueError:
+            raise ValueError('CIDR inválido')
+        return v
 
 
 class VlanCreateRequest(BaseModel):
@@ -271,18 +296,30 @@ async def update_network(network_id: int, body: NetworkUpdateRequest):
 
     Equivalente a: $network->update($request->validated()) en Laravel.
     """
+    # Obtener la red original para saber si cambió el CIDR
+    old_network = await _net_repo.get_by_id(network_id)
+    if not old_network:
+        raise HTTPException(status_code=404, detail="Red no encontrada.")
+        
     network = await _net_repo.update(
         network_id=network_id,
+        cidr=body.cidr,
         vlan_id=body.vlan_id,
         scan_interval=body.scan_interval,
         is_active=body.is_active,
     )
     if not network:
-        raise HTTPException(status_code=404, detail="Red no encontrada.")
+        raise HTTPException(status_code=404, detail="Error actualizando red.")
 
-    # Si se desactiva, pausar el scanner de esa red
-    if body.is_active is False and _scanner_registry:
-        await _scanner_registry.remove_network(network.cidr)
+    if _scanner_registry:
+        # Si se desactiva, pausar el scanner
+        if body.is_active is False:
+            await _scanner_registry.remove_network(old_network.cidr)
+        else:
+            # Si cambió el CIDR y sigue activo, reiniciar el scanner con el nuevo CIDR
+            if old_network.cidr != network.cidr:
+                await _scanner_registry.remove_network(old_network.cidr)
+                await _scanner_registry.add_network(network.cidr, network.id)
 
     return _serialize_network(network)
 
@@ -419,11 +456,16 @@ async def list_devices(
 
     # Fetch open ports for all devices in this network
     open_ports_map = await _port_repo.get_open_ports_by_network(network_id)
+    
+    # Fetch inventory for all devices in this network
+    inventory_list = await _inv_repo.get_by_network(network_id)
+    inventory_map = {inv.device_id: _serialize_inventory(inv) for inv in inventory_list}
 
     serialized = []
     for d in devices:
         sd = _serialize_device(d)
         sd["open_ports"] = open_ports_map.get(d.id, [])
+        sd["inventory"] = inventory_map.get(d.id, None)
         serialized.append(sd)
 
     return {
@@ -444,9 +486,19 @@ async def list_all_devices(
     else:
         devices = await _dev_repo.get_all()
 
+    # Fetch inventory for all devices
+    inventory_list = await _inv_repo.get_all()
+    inventory_map = {inv.device_id: _serialize_inventory(inv) for inv in inventory_list}
+
+    serialized = []
+    for d in devices:
+        sd = _serialize_device(d)
+        sd["inventory"] = inventory_map.get(d.id, None)
+        serialized.append(sd)
+
     return {
         "total":   len(devices),
-        "devices": [_serialize_device(d) for d in devices],
+        "devices": serialized,
     }
 
 
@@ -725,3 +777,50 @@ def _serialize_inventory(i) -> dict:
         "read_method":    i.read_method,
         "last_updated":   i.last_updated.isoformat() if i.last_updated else None,
     }
+
+
+# ──────────────────────────────────────────────
+# INVENTORY — Sincronización con Google Sheets
+# ──────────────────────────────────────────────
+
+from modules.inventory.sheets_sync import process_csv_inventory
+from routes.ws import manager as ws_manager
+import asyncio
+
+# Hardcoded link to the CSV export format of the Google Sheet provided by the user
+GOOGLE_SHEETS_CSV_URL = "https://docs.google.com/spreadsheets/d/1XfoZ3RAc3m6_pHCLartEeODhtVIJOmpK5wFifjyU9G0/export?format=csv&gid=0"
+
+@router.post("/inventory/sync-sheets", tags=["Inventario"])
+async def sync_inventory_from_sheets():
+    """
+    Descarga el inventario desde Google Sheets, actualiza la base de datos
+    y notifica al frontend vía WebSocket.
+    """
+    import logging
+    log = logging.getLogger("api_sync")
+    
+    log.info("Iniciando sincronización manual desde Google Sheets...")
+    
+    # Procesar de forma síncrona/bloqueante usando threads para no bloquear el Event Loop
+    processed_data = await asyncio.to_thread(process_csv_inventory, GOOGLE_SHEETS_CSV_URL)
+    
+    if not processed_data:
+        raise HTTPException(status_code=500, detail="No se pudo procesar el archivo o está vacío.")
+    
+    # Hacer el bulk upsert en PostgreSQL
+    await _inv_repo.bulk_upsert_inventory_and_hostnames(processed_data)
+    
+    # Avisar al frontend que hubo un cambio masivo en los dispositivos
+    await ws_manager.broadcast_to_network("global", {
+        "type": "inventory_sync_complete",
+        "data": {
+            "message": f"Sincronización exitosa de {len(processed_data)} filas.",
+            "timestamp": datetime.now().isoformat()
+        }
+    })
+    
+    return {
+        "status": "success",
+        "message": f"Se procesaron {len(processed_data)} registros del Excel correctamente.",
+        "processed_rows": len(processed_data)
+    }

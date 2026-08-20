@@ -111,6 +111,30 @@ async def lifespan(app: FastAPI):
     log.info("Arrancando CriticalScanner (VIP)...")
     critical_scanner_engine.start()
 
+    # 7. Arrancar Tarea en Segundo Plano para Sincronización de Google Sheets (cada 3 horas)
+    import asyncio
+    from modules.inventory.sheets_sync import process_csv_inventory
+    from routes.api import GOOGLE_SHEETS_CSV_URL, _inv_repo
+
+    async def sheets_sync_task():
+        """Descarga y sincroniza Google Sheets cada 3 horas."""
+        while True:
+            # Esperar 3 horas (10800 segundos) entre sincronizaciones
+            await asyncio.sleep(10800)
+            log.info("Ejecutando sincronización automática desde Google Sheets (Cron 3h)...")
+            try:
+                processed_data = await asyncio.to_thread(process_csv_inventory, GOOGLE_SHEETS_CSV_URL)
+                if processed_data:
+                    await _inv_repo.bulk_upsert_inventory_and_hostnames(processed_data)
+                    log.info(f"Sincronización automática exitosa: {len(processed_data)} equipos actualizados.")
+                else:
+                    log.warning("Sincronización automática falló o el archivo está vacío.")
+            except Exception as e:
+                log.error(f"Error en tarea automática de Google Sheets: {e}")
+
+    sync_task = asyncio.create_task(sheets_sync_task())
+    log.info("Tarea de sincronización de Google Sheets iniciada (Cron 3h).")
+
     log.info("═" * 50)
     log.info("  MvpMonitoreo listo en http://0.0.0.0:8000")
     log.info("  Docs: http://0.0.0.0:8000/docs")
@@ -120,6 +144,9 @@ async def lifespan(app: FastAPI):
 
     # ── CIERRE ────────────────────────────────
     log.info("Cerrando MvpMonitoreo...")
+    
+    # Cancelar tarea de Google Sheets
+    sync_task.cancel()
 
     log.info("Deteniendo scanners...")
     await registry.shutdown()

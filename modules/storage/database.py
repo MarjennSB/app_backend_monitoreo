@@ -283,7 +283,13 @@ class Database:
                 await conn.execute("ALTER TABLE networks ADD CONSTRAINT fk_vlan FOREIGN KEY (vlan_id) REFERENCES vlans(id);")
             except Exception:
                 pass # Ignorar si la FK ya existe u otro error
-            
+
+            # Asegurar que la columna is_critical exista en devices
+            try:
+                await conn.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS is_critical BOOLEAN NOT NULL DEFAULT FALSE;")
+            except Exception:
+                pass
+
             from passlib.hash import bcrypt
 
             # Insert default role
@@ -377,6 +383,7 @@ CREATE TABLE IF NOT EXISTS devices (
     hostname_method VARCHAR(20) NOT NULL DEFAULT 'unknown', -- dns-ptr | netbios | snmp | unknown
     mac_address   VARCHAR(17),                              -- formato AA:BB:CC:DD:EE:FF
     is_alive      BOOLEAN      NOT NULL DEFAULT FALSE,
+    is_critical   BOOLEAN      NOT NULL DEFAULT FALSE,
     last_seen_at  TIMESTAMPTZ,
     first_seen_at TIMESTAMPTZ  NOT NULL DEFAULT NOW(),
     created_at    TIMESTAMPTZ  NOT NULL DEFAULT NOW(),

@@ -23,7 +23,7 @@ def test_network_model_from_record():
     
     model = NetworkModel.from_record(row)
     assert model.id == 1
-    assert model.cidr == "192.168.1.0/24"
+    assert model.cidr == "192.168.10.0/24"
     assert model.vlan_id == 10
     assert model.is_active is True
 

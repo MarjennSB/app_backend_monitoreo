@@ -48,6 +48,7 @@ class ConnectionManager:
 
     async def broadcast_to_network(self, network_id: int, message: dict):
         if network_id in self.active_connections:
+            logger.info(f"Broadcasting to network {network_id}: {message['type']}")
             for connection in self.active_connections[network_id]:
                 try:
                     await connection.send_json(message)

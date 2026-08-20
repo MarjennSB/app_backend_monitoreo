@@ -276,6 +276,7 @@ async def scan_network(
     semaphore: asyncio.Semaphore,
     mode: ScanMode = ScanMode.ACTIVE,
     timeout: float = SOCKET_TIMEOUT,
+    network_id: Optional[int] = None,
 ) -> RawScanData:
     """
     Escanea todos los hosts de una red CIDR.
@@ -295,6 +296,12 @@ async def scan_network(
         RawScanData con todos los resultados crudos del ciclo.
     """
     started_at = datetime.now()
+    
+    # Si por algún motivo se guardó la red sin máscara (ej: "192.168.51.0" en vez de "192.168.51.0/24")
+    # le agregamos /24 por defecto para evitar escanear 1 solo host (como /32)
+    if "/" not in network_cidr:
+        network_cidr = f"{network_cidr}/24"
+        
     network    = ipaddress.IPv4Network(network_cidr, strict=False)
     hosts_iter = list(network.hosts())
 
@@ -327,6 +334,21 @@ async def scan_network(
             )
             _log(ICON_CHECK, B_GREEN,
                  f"{B_GREEN}ACTIVO{NC} {WHITE}{ip}{NC} → {ports_label}")
+                 
+        # --- Notificar WS en tiempo real ---
+        if network_id:
+            try:
+                from routes.ws import manager
+                asyncio.create_task(manager.broadcast_to_network(network_id, {
+                    "type": "host_discovered",
+                    "ip": ip,
+                    "is_alive": alive,
+                    "duration_ms": duration_ms
+                }))
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Error WS broadcast: {e}")
+        # -----------------------------------
 
         return RawHostData(
             ip=ip,
@@ -532,6 +554,7 @@ class NetworkScanner:
             semaphore=semaphore,
             mode=self.mode,
             timeout=self.timeout,
+            network_id=self.network_id,
         )
         self.last_result  = result
         self.last_scan_at = result.finished_at
@@ -581,6 +604,7 @@ class NetworkScanner:
                     semaphore=semaphore,
                     mode=self.mode,
                     timeout=self.timeout,
+                    network_id=self.network_id,
                 )
                 self.last_result  = result
                 self.last_scan_at = result.finished_at
