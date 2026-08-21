@@ -409,6 +409,10 @@ class DeviceRepository:
                                     ELSE devices.hostname_method 
                                   END,
                 is_alive        = EXCLUDED.is_alive,
+                failed_pings_count = CASE 
+                                       WHEN EXCLUDED.is_alive THEN 0 
+                                       ELSE devices.failed_pings_count + 1 
+                                     END,
                 mac_address     = COALESCE(EXCLUDED.mac_address, devices.mac_address),
                 last_seen_at    = CASE WHEN EXCLUDED.is_alive THEN NOW()
                                        ELSE devices.last_seen_at END,

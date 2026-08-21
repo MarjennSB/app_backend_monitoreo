@@ -9,6 +9,7 @@ repositorios de storage/.
 """
 
 import logging
+from datetime import datetime
 from modules.discovery.scanner import RawScanData
 from modules.storage.repository import (
     NetworkRepository,
@@ -19,6 +20,7 @@ from modules.storage.repository import (
 )
 from modules.services.analyzer import analyzer_registry
 from modules.services.ping_icmp import PingResult
+from modules.services.telegram_notifier import notify_in_background
 
 log = logging.getLogger("mvp_monitoreo.sync")
 
@@ -65,13 +67,12 @@ async def sync_scan_result(scan_data: RawScanData) -> None:
 
     # 3. Guardar dispositivos y puertos
     for host in scan_data.hosts:
+        existing = await _dev_repo.get_by_ip(network.id, host.ip)
+
         # Solo guardamos o actualizamos dispositivos vivos, o aquellos que 
         # antes estaban vivos y ahora murieron (para no llenar la BD de IPs vacías).
-        if not host.is_alive:
-            # Verificamos si existe en BD antes de actualizarlo a "caído"
-            existing = await _dev_repo.get_by_ip(network.id, host.ip)
-            if not existing:
-                continue  # Nunca estuvo vivo, lo ignoramos.
+        if not host.is_alive and not existing:
+            continue  # Nunca estuvo vivo, lo ignoramos.
 
         # Upsert: Lo crea si es nuevo, o actualiza su estado (is_alive) si ya existe
         device = await _dev_repo.upsert(
@@ -81,12 +82,42 @@ async def sync_scan_result(scan_data: RawScanData) -> None:
             mac_address=host.mac_address,
         )
 
+        # ¡Lógica de Tolerancia (Anti-Flapping) para VIPs!
+        if device.is_critical:
+            alert_type = None
+            
+            # 1. Regla de Caída: 3 fallos consecutivos
+            if not device.is_alive and device.failed_pings_count == 3:
+                alert_type = "CRITICAL_DEVICE_DOWN"
+            
+            # 2. Regla de Recuperación: Solo si estaba OFICIALMENTE caído (>= 3 fallos previos)
+            elif device.is_alive and existing and not existing.is_alive and existing.failed_pings_count >= 3:
+                alert_type = "CRITICAL_DEVICE_UP"
+
+            if alert_type:
+                alert_msg = {
+                    "type": alert_type,
+                    "device": {
+                        "id": device.id,
+                        "ip": str(device.ip),
+                        "hostname": device.hostname
+                    },
+                    "timestamp": datetime.now().isoformat()
+                }
+                await manager.broadcast_global(alert_msg)
+                
+                # Enviar notificación a Telegram
+                notify_in_background(alert_type, str(device.ip), device.hostname)
+
         updated_devices.append({
             "ip": str(device.ip),
             "hostname": device.hostname,
             "is_alive": device.is_alive,
             "mac_address": device.mac_address,
             "open_ports": host.open_ports,
+            "os": host.os,
+            "vendor": host.vendor,
+            "is_local": host.is_local,
         })
 
         # 4. Guardar los puertos

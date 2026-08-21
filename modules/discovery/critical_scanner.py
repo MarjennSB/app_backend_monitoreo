@@ -51,54 +51,41 @@ class CriticalScanner:
             async with sem:
                 is_alive_now = await ping_host(device.ip)
                 
-                # Detectar si se cayó
-                if device.is_alive and not is_alive_now:
-                    # El dispositivo VIP se acaba de caer
-                    # Actualizar DB primero
-                    device.is_alive = False
-                    await self._dev_repo.upsert(
-                        network_id=device.network_id,
-                        ip=device.ip,
-                        hostname=device.hostname or 'unknown',
-                        hostname_method=device.hostname_method or 'unknown',
-                        is_alive=False,
-                        mac_address=device.mac_address
-                    )
-                    
-                    # Notificar al WebSocket Global
-                    alert_msg = {
-                        "type": "CRITICAL_DEVICE_DOWN",
-                        "device": {
-                            "id": device.id,
-                            "ip": device.ip,
-                            "hostname": device.hostname
-                        },
-                        "timestamp": datetime.now().isoformat()
-                    }
-                    await manager.broadcast_global(alert_msg)
+                # Upsert actualizará el failed_pings_count automáticamente en la BD
+                updated_device = await self._dev_repo.upsert(
+                    network_id=device.network_id,
+                    ip=device.ip,
+                    hostname=device.hostname or 'unknown',
+                    hostname_method=device.hostname_method or 'unknown',
+                    is_alive=is_alive_now,
+                    mac_address=device.mac_address
+                )
                 
-                # Detectar si volvió a subir
-                elif not device.is_alive and is_alive_now:
-                    device.is_alive = True
-                    await self._dev_repo.upsert(
-                        network_id=device.network_id,
-                        ip=device.ip,
-                        hostname=device.hostname or 'unknown',
-                        hostname_method=device.hostname_method or 'unknown',
-                        is_alive=True,
-                        mac_address=device.mac_address
-                    )
-                    
+                # ¡Lógica de Tolerancia (Anti-Flapping) para VIPs!
+                alert_type = None
+                
+                # 1. Regla de Caída: 3 fallos consecutivos
+                if not updated_device.is_alive and updated_device.failed_pings_count == 3:
+                    alert_type = "CRITICAL_DEVICE_DOWN"
+                
+                # 2. Regla de Recuperación: Solo si estaba OFICIALMENTE caído (>= 3 fallos previos)
+                elif updated_device.is_alive and not device.is_alive and getattr(device, 'failed_pings_count', 0) >= 3:
+                    alert_type = "CRITICAL_DEVICE_UP"
+
+                if alert_type:
                     alert_msg = {
-                        "type": "CRITICAL_DEVICE_UP",
+                        "type": alert_type,
                         "device": {
-                            "id": device.id,
-                            "ip": device.ip,
-                            "hostname": device.hostname
+                            "id": updated_device.id,
+                            "ip": str(updated_device.ip),
+                            "hostname": updated_device.hostname
                         },
                         "timestamp": datetime.now().isoformat()
                     }
                     await manager.broadcast_global(alert_msg)
+                    
+                    from modules.services.telegram_notifier import notify_in_background
+                    notify_in_background(alert_type, str(updated_device.ip), updated_device.hostname)
 
         tasks = [check_device(d) for d in vip_devices]
         await asyncio.gather(*tasks)

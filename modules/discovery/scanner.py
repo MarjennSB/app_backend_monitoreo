@@ -30,6 +30,59 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from typing import Dict, List, Optional, Tuple
+import os
+import json
+
+# Load MAC vendors in memory
+MAC_VENDORS_FILE = os.path.join(os.path.dirname(__file__), "mac_vendors.json")
+try:
+    with open(MAC_VENDORS_FILE, "r", encoding="utf-8") as f:
+        MAC_VENDORS_DB = json.load(f)
+except Exception:
+    MAC_VENDORS_DB = {}
+
+def get_mac_vendor(mac: Optional[str]) -> str:
+    if not mac: return "Desconocido"
+    prefix = mac[:8].upper() # Format: XX:XX:XX
+    return MAC_VENDORS_DB.get(prefix, "Desconocido")
+
+def guess_os(open_ports: List[int], vendor: str = "", ip: str = "") -> str:
+    # 1. Por IP (Infraestructura de Red)
+    if ip.endswith(".1") or ip.endswith(".254"):
+        return "Router / Puerta de Enlace"
+
+    # 2. Adivinanza por puertos (muy confiable)
+    if open_ports:
+        if 9100 in open_ports or 515 in open_ports or 631 in open_ports:
+            return "Impresora de Red"
+        if 3389 in open_ports or 445 in open_ports or 139 in open_ports or 135 in open_ports:
+            return "Windows"
+        if 22 in open_ports and 3389 not in open_ports:
+            return "Linux / Servidor"
+        if 62078 in open_ports:
+            return "Dispositivo Apple"
+            
+    # 3. Motor de Heurística por Palabras Clave (Fabricante)
+    v_lower = vendor.lower()
+    
+    DEVICE_KEYWORDS = {
+        "Cámara IP / Seguridad": ["hikvision", "dahua", "axis", "vigi", "tp-link", "ezviz", "imou", "uniview", "reolink"],
+        "Impresora de Red": ["hewlett packard", "hp ", "epson", "brother", "canon", "kyocera", "lexmark", "ricoh", "xerox"],
+        "Móvil (Android)": ["motorola", "samsung", "xiaomi", "huawei", "oppo", "vivo", "oneplus", "realme", "infinix"],
+        "Dispositivo Apple": ["apple"],
+        "Router / Infraestructura": ["cisco", "mikrotik", "ubiquiti", "juniper", "aruba", "netgear", "d-link"],
+        "Dispositivo Inteligente (IoT)": ["amazon", "roku", "tuya", "lg", "tcl", "sonoff", "philips", "google"]
+    }
+    
+    for category, keywords in DEVICE_KEYWORDS.items():
+        if any(kw in v_lower for kw in keywords):
+            return category
+
+    # 4. Fallback si tiene interfaz web
+    if open_ports and (80 in open_ports or 443 in open_ports or 8080 in open_ports):
+        return "Servidor Web / IoT"
+        
+    return "Desconocido"
 
 # Monitor de recursos del VPS — ajusta los slots del semáforo dinámicamente
 from core.system_monitor import system_monitor
@@ -109,6 +162,9 @@ class RawHostData:
     scanned_at: datetime
     scan_duration_ms: float
     mac_address: Optional[str] = None
+    os: Optional[str] = None
+    vendor: Optional[str] = None
+    is_local: bool = False
 
 
 @dataclass
@@ -266,6 +322,32 @@ async def get_arp_macs() -> dict[str, str]:
         return {}
 
 
+def get_local_macs() -> dict[str, str]:
+    """
+    Obtiene las direcciones IP locales y sus respectivas MACs leyendo las interfaces
+    del propio sistema (resuelve el problema de que el localhost no aparece en la tabla ARP).
+    """
+    macs = {}
+    try:
+        import psutil
+        import socket
+        for interface, addrs in psutil.net_if_addrs().items():
+            mac = None
+            ips = []
+            for addr in addrs:
+                if addr.family == psutil.AF_LINK:
+                    mac = addr.address.upper().replace("-", ":")
+                elif addr.family == socket.AF_INET:
+                    ips.append(addr.address)
+            if mac and ips:
+                for ip in ips:
+                    macs[ip] = mac
+    except Exception as e:
+        import logging
+        logging.getLogger(__name__).error(f"Error obteniendo MACs locales: {e}")
+    return macs
+
+
 # ──────────────────────────────────────────────
 # FUNCIÓN PRINCIPAL DE ESCANEO
 # ──────────────────────────────────────────────
@@ -328,12 +410,17 @@ async def scan_network(
         duration_ms = (time.monotonic() - t_start) * 1000
 
         if alive:
+            # Aquí todavía no tenemos el Vendor (se obtiene después con ARP). 
+            # El guess_os inicial se hace solo por puertos e IP. Luego abajo lo recalculamos.
+            os_guess = guess_os(open_p, "", ip)
             ports_label = (
                 f"{B_GREEN}{open_p}{NC}" if open_p
                 else f"{GRAY}sin puertos abiertos{NC}"
             )
             _log(ICON_CHECK, B_GREEN,
-                 f"{B_GREEN}ACTIVO{NC} {WHITE}{ip}{NC} → {ports_label}")
+                 f"{B_GREEN}ACTIVO{NC} {WHITE}{ip}{NC} → {ports_label} [{os_guess}]")
+        else:
+            os_guess = None
                  
         # --- Notificar WS en tiempo real ---
         if network_id:
@@ -343,7 +430,8 @@ async def scan_network(
                     "type": "host_discovered",
                     "ip": ip,
                     "is_alive": alive,
-                    "duration_ms": duration_ms
+                    "duration_ms": duration_ms,
+                    "os": os_guess
                 }))
             except Exception as e:
                 import logging
@@ -357,6 +445,7 @@ async def scan_network(
             closed_ports=closed_p,
             scanned_at=datetime.now(),
             scan_duration_ms=duration_ms,
+            os=os_guess,
         )
 
     tasks     = [_scan_single_host(ip) for ip in hosts_iter]
@@ -364,9 +453,21 @@ async def scan_network(
 
     # 3. Extraer tabla ARP para obtener MACs
     arp_macs = await get_arp_macs()
+    # 4. Fusionar MACs de nuestras propias interfaces locales
+    local_macs = get_local_macs()
+    arp_macs.update(local_macs)
+    
     for host in raw_hosts:
+        host.is_local = host.ip in local_macs
         if host.is_alive and host.ip in arp_macs:
             host.mac_address = arp_macs[host.ip]
+            host.vendor = get_mac_vendor(host.mac_address)
+        else:
+            host.vendor = "Desconocido"
+            
+        # Recalcular el SO ahora que sí tenemos el Vendor
+        if host.is_alive:
+            host.os = guess_os(host.open_ports, host.vendor, host.ip)
 
     finished_at    = datetime.now()
     total_duration = (finished_at - started_at).total_seconds()

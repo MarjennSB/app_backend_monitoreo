@@ -134,6 +134,7 @@ class DeviceModel:
     hostname_method: str              = "unknown"
     is_alive: bool                    = False
     is_critical: bool                 = False
+    failed_pings_count: int           = 0
     mac_address: Optional[str]        = None
     last_seen_at: Optional[datetime]  = None
     first_seen_at: Optional[datetime] = None
@@ -152,6 +153,7 @@ class DeviceModel:
             mac_address=row.get("mac_address"),
             is_alive=row["is_alive"],
             is_critical=row.get("is_critical", False),
+            failed_pings_count=row.get("failed_pings_count", 0),
             last_seen_at=row.get("last_seen_at"),
             first_seen_at=row.get("first_seen_at"),
             created_at=row.get("created_at"),

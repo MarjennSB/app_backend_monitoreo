@@ -284,9 +284,10 @@ class Database:
             except Exception:
                 pass # Ignorar si la FK ya existe u otro error
 
-            # Asegurar que la columna is_critical exista en devices
+            # Asegurar que la columna is_critical y failed_pings_count exista en devices
             try:
                 await conn.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS is_critical BOOLEAN NOT NULL DEFAULT FALSE;")
+                await conn.execute("ALTER TABLE devices ADD COLUMN IF NOT EXISTS failed_pings_count INTEGER NOT NULL DEFAULT 0;")
             except Exception:
                 pass
 
